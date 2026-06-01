@@ -1,0 +1,29 @@
+{
+  "name": "@raph-reader/backend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "NODE_ENV=development tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fastify/multipart": "^10.0.0",
+    "better-sqlite3": "^11.0.0",
+    "fastify": "^5.0.0",
+    "iconv-lite": "^0.6.3",
+    "jschardet": "^3.1.4",
+    "uuid": "^14.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^22.0.0",
+    "@types/uuid": "^10.0.0",
+    "form-data": "^4.0.5",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
