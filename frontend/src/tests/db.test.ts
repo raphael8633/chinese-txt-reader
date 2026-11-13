@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto'
 import Dexie from 'dexie'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { db, RaphReaderDb } from '../db.js'
-import { saveBookForOffline } from '../offline.js'
+import { localBookToBook, saveBookForOffline, syncOfflineWorkIds, toLocalBook } from '../offline.js'
 
 class RaphReaderDbV2 extends Dexie {
   constructor(name: string) {
@@ -96,6 +96,22 @@ describe('RaphReaderDb migrations', () => {
       bookId: 'book-2',
       isAvailableOffline: true,
     })
+  })
+
+  it('keeps the work id on an offline copy so the offline library groups editions by work', () => {
+    const book = { id: 'web-a', title: '同名書', charCount: 0, fileSize: 0, createdAt: '2026-08-01T00:00:00Z',
+      sourceType: 'web' as const, workId: 'w1' }
+    expect(localBookToBook(toLocalBook(book, '2026-11-13T00:00:00Z', true)).workId).toBe('w1')
+  })
+
+  it('refreshes the work id of copies downloaded earlier from the online library', async () => {
+    await db.open()
+    const base = { id: 'web-a', title: '同名書', charCount: 0, fileSize: 0, createdAt: '2026-08-01T00:00:00Z', sourceType: 'web' as const }
+    await db.books.put(toLocalBook(base, '2026-11-01T00:00:00Z', true))
+    await db.books.put(toLocalBook({ ...base, id: 'web-b', workId: 'old' }, '2026-11-01T00:00:00Z', true))
+    await syncOfflineWorkIds([{ ...base, workId: 'w1' }, { ...base, id: 'web-b' }])
+    expect((await db.books.get('web-a'))?.workId).toBe('w1')
+    expect((await db.books.get('web-b'))?.workId).toBeUndefined()
   })
 })
 

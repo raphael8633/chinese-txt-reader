@@ -22,6 +22,24 @@ export default defineConfig({
       },
     }),
   ],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/opencc-js')) {
+            return 'opencc'
+          }
+          if (
+            id.includes('node_modules/react-dom')
+            || id.includes('node_modules/react-router')
+            || id.includes('node_modules/react/')
+          ) {
+            return 'vendor'
+          }
+        },
+      },
+    },
+  },
   server: {
     port: 5174,
     proxy: {
@@ -39,12 +57,12 @@ export default defineConfig({
   preview: {
     host: '127.0.0.1',
     port: 5174,
-    allowedHosts: ['localhost'],
+    allowedHosts: (process.env.READER_ALLOWED_HOSTS ?? 'localhost').split(','),
   },
   test: {
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./src/tests/setup.ts'],
-    exclude: ['**/node_modules/**'],
+    exclude: ['**/node_modules/**', '**/e2e/**'],
   },
 })

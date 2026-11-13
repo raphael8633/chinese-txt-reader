@@ -9,6 +9,8 @@ interface SyncPluginOptions {
 interface ProgressRow {
   position_type: string
   position_value: number
+  chapter_offset: number | null
+  chapter_progress: number | null
   page_index: number | null
   updated_at: string
 }
@@ -23,6 +25,7 @@ interface SettingsRow {
   toolbar_side?: string
   hard_wrap_mode?: string
   chinese_conversion?: string
+  content_filters_json?: string
   padding_top?: number
   padding_bottom?: number
   annotation_margin_top?: number
@@ -47,6 +50,7 @@ const DEFAULT_SETTINGS = {
   toolbarSide: 'right',
   hardWrapMode: 'auto',
   chineseConversion: 'none',
+  contentFilters: [] as string[],
   paddingTop: 9,
   paddingBottom: 8,
   annotationMarginTop: 20,
@@ -71,7 +75,7 @@ export const syncRoutes: FastifyPluginAsync<SyncPluginOptions> = async (app, opt
 
     const row = db
       .prepare(
-        `SELECT position_type, position_value, page_index, updated_at
+        `SELECT position_type, position_value, chapter_offset, chapter_progress, page_index, updated_at
          FROM reading_progress WHERE user_id = ? AND book_id = ?`,
       )
       .get(userId, id) as ProgressRow | undefined
@@ -83,6 +87,7 @@ export const syncRoutes: FastifyPluginAsync<SyncPluginOptions> = async (app, opt
     return reply.code(200).send({
       positionType: row.position_type,
       positionValue: row.position_value,
+      ...(row.chapter_offset === null ? {} : { chapterOffset: row.chapter_offset, chapterProgress: row.chapter_progress }),
       pageIndex: row.page_index,
       updatedAt: row.updated_at,
     })
@@ -91,7 +96,7 @@ export const syncRoutes: FastifyPluginAsync<SyncPluginOptions> = async (app, opt
   // POST /api/books/:id/progress
   app.post('/api/books/:id/progress', { preHandler: authHook }, async (req, reply) => {
     const { id } = req.params as { id: string }
-    const body = req.body as { positionType?: unknown; positionValue?: unknown }
+    const body = req.body as { positionType?: unknown; positionValue?: unknown; chapterOffset?: unknown; chapterProgress?: unknown }
 
     if (typeof body.positionType !== 'string') {
       return reply.code(400).send({ error: 'positionType must be a string' })
@@ -100,17 +105,34 @@ export const syncRoutes: FastifyPluginAsync<SyncPluginOptions> = async (app, opt
       return reply.code(400).send({ error: 'positionValue must be a number' })
     }
 
+    const hasAnchor = body.chapterOffset !== undefined || body.chapterProgress !== undefined
+    if (hasAnchor && (body.positionType !== 'chapter_index'
+      || !Number.isSafeInteger(body.positionValue) || body.positionValue < 0
+      || typeof body.chapterOffset !== 'number' || !Number.isSafeInteger(body.chapterOffset) || body.chapterOffset < 0
+      || typeof body.chapterProgress !== 'number' || !Number.isFinite(body.chapterProgress)
+      || body.chapterProgress < 0 || body.chapterProgress > 1)) {
+      return reply.code(400).send({ error: 'chapterOffset and chapterProgress must be a valid chapter anchor' })
+    }
+
     const userId = req.userId
     const now = new Date().toISOString()
 
+    // A work member's position lives only in its work (shared-progress); a per-book row
+    // would never be read. Refusing keeps the client's row pending for the shared save.
+    if (db.prepare('SELECT 1 FROM reading_work_members WHERE user_id = ? AND book_id = ?').get(userId, id)) {
+      return reply.code(409).send({ error: 'Book is in a shared work; save through shared-progress' })
+    }
+
     db.prepare(
-      `INSERT INTO reading_progress (user_id, book_id, position_type, position_value, updated_at)
-       VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO reading_progress (user_id, book_id, position_type, position_value, chapter_offset, chapter_progress, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id, book_id) DO UPDATE SET
          position_type = excluded.position_type,
          position_value = excluded.position_value,
+         chapter_offset = excluded.chapter_offset,
+         chapter_progress = excluded.chapter_progress,
          updated_at = excluded.updated_at`,
-    ).run(userId, id, body.positionType, body.positionValue, now)
+    ).run(userId, id, body.positionType, body.positionValue, body.chapterOffset ?? null, body.chapterProgress ?? null, now)
 
     return reply.code(200).send({ ok: true })
   })
@@ -122,10 +144,21 @@ export const syncRoutes: FastifyPluginAsync<SyncPluginOptions> = async (app, opt
     const bookId = query.bookId
 
     const SELECT_COLS = `font_size_px, line_height, letter_spacing_px, text_color, background_color, reading_mode,
-      toolbar_side, hard_wrap_mode, chinese_conversion,
+      toolbar_side, hard_wrap_mode, chinese_conversion, content_filters_json,
       padding_top, padding_bottom, annotation_margin_top, annotation_margin_bottom,
       margin_left, margin_right, paragraph_spacing, paragraph_indent, font_weight, justify_text,
       tap_scroll_percent, tap_scroll_mode`
+
+    function parseContentFilters(value: string | undefined): string[] {
+      if (!value) return DEFAULT_SETTINGS.contentFilters
+      try {
+        const parsed = JSON.parse(value)
+        if (!Array.isArray(parsed)) return DEFAULT_SETTINGS.contentFilters
+        return parsed.filter((item): item is string => typeof item === 'string').map(item => item.trim()).filter(Boolean)
+      } catch {
+        return DEFAULT_SETTINGS.contentFilters
+      }
+    }
 
     function rowToSettings(row: SettingsRow) {
       return {
@@ -138,6 +171,7 @@ export const syncRoutes: FastifyPluginAsync<SyncPluginOptions> = async (app, opt
         toolbarSide: row.toolbar_side === 'left' ? 'left' : 'right',
         hardWrapMode: row.hard_wrap_mode === 'merge' || row.hard_wrap_mode === 'preserve' ? row.hard_wrap_mode : 'auto',
         chineseConversion: row.chinese_conversion === 'traditional' || row.chinese_conversion === 'simplified' ? row.chinese_conversion : 'none',
+        contentFilters: parseContentFilters(row.content_filters_json),
         paddingTop: row.padding_top ?? DEFAULT_SETTINGS.paddingTop,
         paddingBottom: row.padding_bottom ?? DEFAULT_SETTINGS.paddingBottom,
         annotationMarginTop: row.annotation_margin_top ?? DEFAULT_SETTINGS.annotationMarginTop,
@@ -209,6 +243,7 @@ export const syncRoutes: FastifyPluginAsync<SyncPluginOptions> = async (app, opt
       toolbarSide?: unknown
       hardWrapMode?: unknown
       chineseConversion?: unknown
+      contentFilters?: unknown
       paddingTop?: unknown
       paddingBottom?: unknown
       annotationMarginTop?: unknown
@@ -260,6 +295,14 @@ export const syncRoutes: FastifyPluginAsync<SyncPluginOptions> = async (app, opt
     ) {
       return reply.code(400).send({ error: 'chineseConversion must be none, traditional, or simplified' })
     }
+    if (body.contentFilters !== undefined) {
+      if (!Array.isArray(body.contentFilters)) {
+        return reply.code(400).send({ error: 'contentFilters must be an array of strings' })
+      }
+      if (!body.contentFilters.every(item => typeof item === 'string')) {
+        return reply.code(400).send({ error: 'contentFilters must be an array of strings' })
+      }
+    }
     if (body.fontWeight !== undefined) {
       const fw = body.fontWeight
       if (typeof fw !== 'number' || fw < 100 || fw > 900 || fw % 100 !== 0) {
@@ -294,6 +337,10 @@ export const syncRoutes: FastifyPluginAsync<SyncPluginOptions> = async (app, opt
     const toolbarSide = body.toolbarSide === 'left' ? 'left' : 'right'
     const hardWrapMode = body.hardWrapMode === 'merge' || body.hardWrapMode === 'preserve' ? body.hardWrapMode : 'auto'
     const chineseConversion = body.chineseConversion === 'traditional' || body.chineseConversion === 'simplified' ? body.chineseConversion : 'none'
+    const contentFilters = Array.isArray(body.contentFilters)
+      ? body.contentFilters.map(item => item.trim()).filter(Boolean)
+      : DEFAULT_SETTINGS.contentFilters
+    const contentFiltersJson = JSON.stringify(contentFilters)
     const paddingTop = body.paddingTop !== undefined ? Number(body.paddingTop) : DEFAULT_SETTINGS.paddingTop
     const paddingBottom = body.paddingBottom !== undefined ? Number(body.paddingBottom) : DEFAULT_SETTINGS.paddingBottom
     const annotationMarginTop = body.annotationMarginTop !== undefined ? Number(body.annotationMarginTop) : DEFAULT_SETTINGS.annotationMarginTop
@@ -310,11 +357,11 @@ export const syncRoutes: FastifyPluginAsync<SyncPluginOptions> = async (app, opt
     db.prepare(
       `INSERT INTO reader_settings (
         user_id, book_id, font_size_px, line_height, letter_spacing_px, text_color, background_color, reading_mode,
-        toolbar_side, hard_wrap_mode, chinese_conversion,
+        toolbar_side, hard_wrap_mode, chinese_conversion, content_filters_json,
         padding_top, padding_bottom, annotation_margin_top, annotation_margin_bottom,
         margin_left, margin_right, paragraph_spacing, paragraph_indent, font_weight, justify_text,
         tap_scroll_percent, tap_scroll_mode
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id, book_id) DO UPDATE SET
          font_size_px = excluded.font_size_px,
          line_height = excluded.line_height,
@@ -325,6 +372,7 @@ export const syncRoutes: FastifyPluginAsync<SyncPluginOptions> = async (app, opt
          toolbar_side = excluded.toolbar_side,
          hard_wrap_mode = excluded.hard_wrap_mode,
          chinese_conversion = excluded.chinese_conversion,
+         content_filters_json = excluded.content_filters_json,
          padding_top = excluded.padding_top,
          padding_bottom = excluded.padding_bottom,
          annotation_margin_top = excluded.annotation_margin_top,
@@ -340,7 +388,7 @@ export const syncRoutes: FastifyPluginAsync<SyncPluginOptions> = async (app, opt
     ).run(
       userId, bookId,
       body.fontSizePx, body.lineHeight, body.letterSpacingPx, body.textColor, body.backgroundColor, body.readingMode,
-      toolbarSide, hardWrapMode, chineseConversion,
+      toolbarSide, hardWrapMode, chineseConversion, contentFiltersJson,
       paddingTop, paddingBottom, annotationMarginTop, annotationMarginBottom,
       marginLeft, marginRight, paragraphSpacing, paragraphIndent, fontWeight, justifyText,
       tapScrollPercent, tapScrollMode,

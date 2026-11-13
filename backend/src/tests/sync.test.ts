@@ -94,6 +94,40 @@ describe('Sync API', () => {
       expect(res.json().positionValue).toBe(50)
     })
 
+    it('round-trips fine chapter progress and clears it on a legacy chapter jump', async () => {
+      await app.inject({ method: 'POST', url: '/api/books/b1/progress',
+        payload: { positionType: 'chapter_index', positionValue: 0, chapterOffset: 1234, chapterProgress: 0.1234 } })
+      const saved = await app.inject({ method: 'GET', url: '/api/books/b1/progress' })
+      expect(saved.json()).toMatchObject({ positionValue: 0, chapterOffset: 1234, chapterProgress: 0.1234 })
+      await app.inject({ method: 'POST', url: '/api/books/b1/progress',
+        payload: { positionType: 'chapter_index', positionValue: 1 } })
+      const jumped = await app.inject({ method: 'GET', url: '/api/books/b1/progress' })
+      expect(jumped.json().chapterOffset).toBeUndefined()
+      expect(jumped.json().chapterProgress).toBeUndefined()
+    })
+
+    it('includes chapter detail in the library progress fallback', async () => {
+      db.prepare(`INSERT INTO books (id, user_id, title, original_filename, file_size, char_count, paragraph_count, created_at, updated_at)
+        VALUES ('b1', 'dev-user', '書', 'book.txt', 0, 0, 1, '2026-01-01', '2026-01-01')`).run()
+      await app.inject({ method: 'POST', url: '/api/books/b1/progress',
+        payload: { positionType: 'chapter_index', positionValue: 0, chapterOffset: 20, chapterProgress: 0.25 } })
+      const library = await app.inject({ method: 'GET', url: '/api/books' })
+      expect(library.json()[0].progress).toMatchObject({ chapterOffset: 20, chapterProgress: 0.25 })
+    })
+
+    it.each([
+      { chapterOffset: -1, chapterProgress: 0.1 },
+      { chapterOffset: 1.5, chapterProgress: 0.1 },
+      { chapterOffset: 1, chapterProgress: 1.1 },
+      { chapterOffset: 1, chapterProgress: -0.1 },
+      { chapterOffset: 1 },
+      { chapterProgress: 0.1 },
+    ])('rejects invalid fine progress %j', async (anchor) => {
+      const result = await app.inject({ method: 'POST', url: '/api/books/b1/progress',
+        payload: { positionType: 'chapter_index', positionValue: 0, ...anchor } })
+      expect(result.statusCode).toBe(400)
+    })
+
     it('POST with missing positionValue → 400', async () => {
       const res = await app.inject({
         method: 'POST',
@@ -114,6 +148,7 @@ describe('Sync API', () => {
       expect(body.textColor).toBe('#333333')
       expect(body.hardWrapMode).toBe('auto')
       expect(body.chineseConversion).toBe('none')
+      expect(body.contentFilters).toEqual([])
     })
 
     it('POST /api/settings with full valid payload → 200', async () => {
@@ -130,6 +165,7 @@ describe('Sync API', () => {
           readingMode: 'scroll',
           hardWrapMode: 'preserve',
           chineseConversion: 'traditional',
+          contentFilters: ['請收藏本站', '[廣告]'],
         },
         headers: { 'content-type': 'application/json' },
       })
@@ -175,6 +211,7 @@ describe('Sync API', () => {
           textColor: '#222222',
           backgroundColor: '#ffffff',
           readingMode: 'scroll',
+          contentFilters: ['請收藏本站', '[廣告]'],
         },
         headers: { 'content-type': 'application/json' },
       })
@@ -358,6 +395,7 @@ describe('Sync API', () => {
           paddingTop: 15,
           fontWeight: 700,
           justifyText: false,
+          contentFilters: ['請收藏本站', '[廣告]'],
         },
         headers: { 'content-type': 'application/json' },
       })
@@ -368,6 +406,7 @@ describe('Sync API', () => {
       expect(body.paddingTop).toBe(15)
       expect(body.fontWeight).toBe(700)
       expect(body.justifyText).toBe(false)
+      expect(body.contentFilters).toEqual(['請收藏本站', '[廣告]'])
     })
 
     it('GET /api/settings returns new fields with defaults when nothing saved', async () => {
@@ -385,6 +424,47 @@ describe('Sync API', () => {
       expect(body.fontWeight).toBe(400)
       expect(body.justifyText).toBe(true)
       expect(body.chineseConversion).toBe('none')
+      expect(body.contentFilters).toEqual([])
+    })
+
+    it('POST /api/settings with non-array contentFilters → 400', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/settings',
+        payload: {
+          bookId: null,
+          fontSizePx: 18,
+          lineHeight: 1.8,
+          letterSpacingPx: 0,
+          textColor: '#333333',
+          backgroundColor: '#f5f0e8',
+          readingMode: 'scroll',
+          contentFilters: '請收藏本站',
+        },
+        headers: { 'content-type': 'application/json' },
+      })
+      expect(res.statusCode).toBe(400)
+      expect(res.json().error).toMatch(/contentFilters/)
+    })
+
+    it('POST /api/settings with non-string content filter → 400', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/settings',
+        payload: {
+          bookId: null,
+          fontSizePx: 18,
+          lineHeight: 1.8,
+          letterSpacingPx: 0,
+          textColor: '#333333',
+          backgroundColor: '#f5f0e8',
+          readingMode: 'scroll',
+          contentFilters: ['請收藏本站', 123],
+        },
+        headers: { 'content-type': 'application/json' },
+      })
+      expect(res.statusCode).toBe(400)
+      expect(res.json().error).toMatch(/contentFilters/)
     })
 
     it('POST /api/settings with non-finite paddingTop → 400', async () => {

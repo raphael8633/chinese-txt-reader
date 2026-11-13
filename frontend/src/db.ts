@@ -6,9 +6,14 @@ export interface LocalBook {
   charCount: number
   fileSize: number
   paragraphCount?: number
-  chapters?: { index: number; title: string }[]
+  chapters?: { index: number; title: string; sourceUrl?: string; chapterKey?: string }[]
   createdAt: string
   updatedAt?: string
+  sourceType?: 'txt' | 'web'
+  sourceUrl?: string | null
+  manifestVersion?: number
+  /** The shared work the server reported at download time; offline cards group by it. */
+  workId?: string
   downloadedAt: string
   contentVersion: string
   isAvailableOffline: boolean
@@ -21,12 +26,30 @@ export interface LocalContentChunk {
   cachedAt: string
 }
 
+export interface LocalWebChapter {
+  bookId: string
+  chapterIndex: number
+  title: string
+  sourceUrl?: string
+  sourceTimestamp?: string
+  contentHash?: string
+  text: string
+  cachedAt: string
+}
+
 export interface LocalProgress {
   bookId: string
   positionType: string
   positionValue: number
+  chapterOffset?: number
+  chapterProgress?: number
   pageIndex?: number
   updatedAt: string
+  // true: this device wrote the position and the server has not confirmed it.
+  // Missing on rows written before the flag existed; merges treat that as synced.
+  pendingSync?: boolean
+  // While pendingSync: the last position the server confirmed (missing when unknown).
+  syncedPosition?: { positionType: string; positionValue: number; chapterOffset?: number; chapterProgress?: number }
 }
 
 export interface LocalSettings {
@@ -42,6 +65,7 @@ export interface LocalSettings {
   toolbarSide: 'left' | 'right'
   hardWrapMode: 'auto' | 'merge' | 'preserve'
   chineseConversion: 'none' | 'traditional' | 'simplified'
+  contentFilters: string[]
   paddingTop: number
   paddingBottom: number
   annotationMarginTop: number
@@ -57,6 +81,7 @@ export interface LocalSettings {
 export class RaphReaderDb extends Dexie {
   books!: Table<LocalBook, string>
   contentChunks!: Table<LocalContentChunk, [string, number]>
+  webChapterCache!: Table<LocalWebChapter, [string, number]>
   progress!: Table<LocalProgress, string>
   settings!: Table<LocalSettings, string | null>
 
@@ -90,6 +115,14 @@ export class RaphReaderDb extends Dexie {
       books: 'bookId, title, downloadedAt, isAvailableOffline',
       content: 'bookId',
       contentChunks: '[bookId+chunkIndex], bookId, cachedAt',
+      progress: 'bookId, updatedAt',
+      settings: 'bookId',
+    })
+    this.version(5).stores({
+      books: 'bookId, title, downloadedAt, isAvailableOffline',
+      content: 'bookId',
+      contentChunks: '[bookId+chunkIndex], bookId, cachedAt',
+      webChapterCache: '[bookId+chapterIndex], bookId, cachedAt',
       progress: 'bookId, updatedAt',
       settings: 'bookId',
     })

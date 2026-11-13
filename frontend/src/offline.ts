@@ -14,6 +14,10 @@ export function toLocalBook(book: Book, downloadedAt: string, isAvailableOffline
     chapters: book.chapters,
     createdAt: book.createdAt,
     updatedAt: book.updatedAt,
+    sourceType: book.sourceType ?? 'txt',
+    sourceUrl: book.sourceUrl ?? null,
+    manifestVersion: book.manifestVersion,
+    ...(book.workId ? { workId: book.workId } : {}),
     contentVersion: book.updatedAt ?? book.createdAt,
     downloadedAt,
     isAvailableOffline,
@@ -31,6 +35,10 @@ export function localBookToBook(book: LocalBook, progress?: Progress | null): Bo
     createdAt: book.createdAt,
     updatedAt: book.updatedAt,
     progress,
+    sourceType: book.sourceType,
+    sourceUrl: book.sourceUrl,
+    manifestVersion: book.manifestVersion,
+    ...(book.workId ? { workId: book.workId } : {}),
   }
 }
 
@@ -47,6 +55,18 @@ export async function listOfflineBooks(): Promise<Book[]> {
   })
 }
 
+/** Copies the server's current work id onto offline copies, so offline cards group as online ones do. */
+export async function syncOfflineWorkIds(books: Book[]): Promise<void> {
+  await db.transaction('rw', db.books, async () => {
+    for (const book of books) {
+      const local = await db.books.get(book.id)
+      if (!local || local.workId === book.workId) continue
+      const { workId: _previous, ...rest } = local
+      await db.books.put(book.workId ? { ...rest, workId: book.workId } : rest)
+    }
+  })
+}
+
 export async function getOfflineBook(bookId: string): Promise<Book | null> {
   const localBook = await db.books.get(bookId)
   if (!localBook?.isAvailableOffline) return null
@@ -57,9 +77,30 @@ export async function getOfflineBook(bookId: string): Promise<Book | null> {
 export async function readBookContentChunks(bookId: string): Promise<string | null> {
   const localBook = await db.books.get(bookId)
   if (!localBook?.isAvailableOffline) return null
+  if (localBook.sourceType === 'web') return null
   const chunks = await db.contentChunks.where('bookId').equals(bookId).sortBy('chunkIndex')
   if (chunks.length === 0) return null
   return chunks.map(chunk => chunk.text).join('')
+}
+
+export async function getLocalContentVersion(bookId: string): Promise<string | null> {
+  const localBook = await db.books.get(bookId)
+  return localBook?.contentVersion ?? null
+}
+
+export async function isLocallyAvailableOffline(bookId: string): Promise<boolean> {
+  const localBook = await db.books.get(bookId)
+  return !!localBook?.isAvailableOffline
+}
+
+// Flip isAvailableOffline=false but keep chunks in place. Used as a
+// safe-window marker when re-streaming a stale book: if the user kills the
+// tab mid-stream, the next offline session won't surface stale chunks.
+// saveBookForOffline at the end of a successful stream restores the flag.
+export async function invalidateOfflineCopy(bookId: string): Promise<void> {
+  const localBook = await db.books.get(bookId)
+  if (!localBook?.isAvailableOffline) return
+  await db.books.put({ ...localBook, isAvailableOffline: false })
 }
 
 export async function saveBookForOffline(book: Book, text: string): Promise<void> {
@@ -86,8 +127,9 @@ export async function saveBookForOffline(book: Book, text: string): Promise<void
 }
 
 export async function removeOfflineBook(bookId: string): Promise<void> {
-  await db.transaction('rw', db.books, db.contentChunks, async () => {
+  await db.transaction('rw', db.books, db.contentChunks, db.webChapterCache, async () => {
     await db.contentChunks.where('bookId').equals(bookId).delete()
+    await db.webChapterCache.where('bookId').equals(bookId).delete()
     await db.books.delete(bookId)
   })
 }
